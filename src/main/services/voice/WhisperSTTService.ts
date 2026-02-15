@@ -1,0 +1,216 @@
+import OpenAI from 'openai';
+import fs from 'fs';
+import path from 'path';
+import { app } from 'electron';
+
+/**
+ * WhisperSTTService - Speech-to-Text using OpenAI Whisper API
+ *
+ * Features:
+ * - Streaming transcription support (processes audio chunks)
+ * - Multi-language support
+ * - High accuracy transcription
+ */
+export class WhisperSTTService {
+  private openai: OpenAI | null = null;
+  private isInitialized: boolean = false;
+  private tempAudioDir: string;
+
+  constructor(apiKey?: string) {
+    this.tempAudioDir = path.join(app.getPath('temp'), 'ai-companion-audio');
+
+    // Create temp directory for audio files
+    if (!fs.existsSync(this.tempAudioDir)) {
+      fs.mkdirSync(this.tempAudioDir, { recursive: true });
+    }
+
+    if (apiKey) {
+      this.initialize(apiKey);
+    }
+  }
+
+  /**
+   * Initialize the Whisper service with API key
+   */
+  initialize(apiKey: string): void {
+    try {
+      this.openai = new OpenAI({
+        apiKey: apiKey,
+      });
+      this.isInitialized = true;
+      console.log('WhisperSTTService initialized successfully');
+    } catch (error) {
+      console.error('Failed to initialize WhisperSTTService:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Check if service is initialized
+   */
+  isReady(): boolean {
+    return this.isInitialized && this.openai !== null;
+  }
+
+  /**
+   * Transcribe audio from a buffer
+   * @param audioBuffer - Audio data as Buffer
+   * @param language - Optional language code (e.g., 'en', 'es')
+   * @returns Transcribed text
+   */
+  async transcribeBuffer(
+    audioBuffer: Buffer,
+    language: string = 'en'
+  ): Promise<{ text: string; duration?: number }> {
+    if (!this.isReady()) {
+      throw new Error('WhisperSTTService not initialized. Call initialize() with API key first.');
+    }
+
+    const startTime = Date.now();
+
+    try {
+      // Write buffer to temporary file
+      const tempFilePath = path.join(
+        this.tempAudioDir,
+        `audio-${Date.now()}.webm`
+      );
+
+      fs.writeFileSync(tempFilePath, audioBuffer);
+
+      // Transcribe using Whisper API
+      const transcription = await this.openai!.audio.transcriptions.create({
+        file: fs.createReadStream(tempFilePath),
+        model: 'whisper-1',
+        language: language,
+        response_format: 'json',
+      });
+
+      // Clean up temp file
+      fs.unlinkSync(tempFilePath);
+
+      const duration = Date.now() - startTime;
+
+      console.log(`Transcription completed in ${duration}ms: "${transcription.text}"`);
+
+      return {
+        text: transcription.text.trim(),
+        duration,
+      };
+    } catch (error) {
+      console.error('Transcription error:', error);
+      throw new Error(`Failed to transcribe audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Transcribe audio from a file path
+   * @param filePath - Path to audio file
+   * @param language - Optional language code
+   * @returns Transcribed text
+   */
+  async transcribeFile(
+    filePath: string,
+    language: string = 'en'
+  ): Promise<{ text: string; duration?: number }> {
+    if (!this.isReady()) {
+      throw new Error('WhisperSTTService not initialized. Call initialize() with API key first.');
+    }
+
+    const startTime = Date.now();
+
+    try {
+      const transcription = await this.openai!.audio.transcriptions.create({
+        file: fs.createReadStream(filePath),
+        model: 'whisper-1',
+        language: language,
+        response_format: 'json',
+      });
+
+      const duration = Date.now() - startTime;
+
+      console.log(`Transcription completed in ${duration}ms: "${transcription.text}"`);
+
+      return {
+        text: transcription.text.trim(),
+        duration,
+      };
+    } catch (error) {
+      console.error('Transcription error:', error);
+      throw new Error(`Failed to transcribe audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Transcribe with timestamps for word-level timing
+   */
+  async transcribeWithTimestamps(
+    audioBuffer: Buffer,
+    language: string = 'en'
+  ): Promise<{ text: string; segments?: any[]; duration?: number }> {
+    if (!this.isReady()) {
+      throw new Error('WhisperSTTService not initialized. Call initialize() with API key first.');
+    }
+
+    const startTime = Date.now();
+
+    try {
+      const tempFilePath = path.join(
+        this.tempAudioDir,
+        `audio-${Date.now()}.webm`
+      );
+
+      fs.writeFileSync(tempFilePath, audioBuffer);
+
+      const transcription = await this.openai!.audio.transcriptions.create({
+        file: fs.createReadStream(tempFilePath),
+        model: 'whisper-1',
+        language: language,
+        response_format: 'verbose_json',
+        timestamp_granularities: ['segment'],
+      });
+
+      fs.unlinkSync(tempFilePath);
+
+      const duration = Date.now() - startTime;
+
+      return {
+        text: transcription.text.trim(),
+        segments: (transcription as any).segments,
+        duration,
+      };
+    } catch (error) {
+      console.error('Transcription with timestamps error:', error);
+      throw new Error(`Failed to transcribe audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Clean up temporary audio files
+   */
+  cleanup(): void {
+    try {
+      if (fs.existsSync(this.tempAudioDir)) {
+        const files = fs.readdirSync(this.tempAudioDir);
+        files.forEach(file => {
+          const filePath = path.join(this.tempAudioDir, file);
+          fs.unlinkSync(filePath);
+        });
+      }
+      console.log('Temporary audio files cleaned up');
+    } catch (error) {
+      console.error('Error cleaning up temp files:', error);
+    }
+  }
+}
+
+// Singleton instance
+let instance: WhisperSTTService | null = null;
+
+export function getWhisperSTTService(apiKey?: string): WhisperSTTService {
+  if (!instance) {
+    instance = new WhisperSTTService(apiKey);
+  } else if (apiKey && !instance.isReady()) {
+    instance.initialize(apiKey);
+  }
+  return instance;
+}

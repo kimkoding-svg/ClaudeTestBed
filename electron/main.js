@@ -1,6 +1,9 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 
+// Load voice IPC handlers
+const voiceIPC = require('./voice-ipc');
+
 // Disable GPU acceleration for better compatibility
 app.disableHardwareAcceleration();
 
