@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Voice
   startRecording: () => ipcRenderer.invoke(IPC_CHANNELS.VOICE_START_RECORDING),
   stopRecording: () => ipcRenderer.invoke(IPC_CHANNELS.VOICE_STOP_RECORDING),
+  addAudioChunk: (audioData) => ipcRenderer.invoke('voice:add-audio-chunk', audioData),
   onTranscript: (callback) => {
     const subscription = (_event, transcript) => callback(transcript);
     ipcRenderer.on(IPC_CHANNELS.VOICE_TRANSCRIPT, subscription);
