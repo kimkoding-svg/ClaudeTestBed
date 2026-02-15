@@ -1,0 +1,20 @@
+appId: com.aicompanion.app
+productName: AI Companion
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+win:
+  target:
+    - nsis
+mac:
+  target:
+    - dmg
+  category: public.app-category.productivity
+linux:
+  target:
+    - AppImage
+  category: Utility
