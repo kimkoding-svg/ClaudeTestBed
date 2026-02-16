@@ -1,8 +1,9 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+const dotenv = require('dotenv');
 
-// Load voice IPC handlers
-const voiceIPC = require('./voice-ipc');
+// Load environment variables
+dotenv.config();
 
 // Disable GPU acceleration for better compatibility
 app.disableHardwareAcceleration();
@@ -16,7 +17,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -31,12 +32,12 @@ function createWindow() {
   });
 
   // Load the app
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
     // Open DevTools in development
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
   mainWindow.on('closed', () => {
@@ -47,6 +48,11 @@ function createWindow() {
 // App lifecycle
 app.whenReady().then(() => {
   console.log('App is ready, creating window...');
+
+  // Register voice IPC handlers after app is ready
+  const { registerVoiceHandlers } = require('./voice-ipc');
+  registerVoiceHandlers(ipcMain);
+
   createWindow();
 
   app.on('activate', () => {

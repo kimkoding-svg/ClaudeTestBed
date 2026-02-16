@@ -1,7 +1,15 @@
 import OpenAI from 'openai';
 import fs from 'fs';
 import path from 'path';
-import { app } from 'electron';
+import os from 'os';
+
+// Try to import electron, but don't fail if not available
+let app: any = null;
+try {
+  app = require('electron').app;
+} catch {
+  // Not in Electron context, use Node.js alternatives
+}
 
 /**
  * WhisperSTTService - Speech-to-Text using OpenAI Whisper API
@@ -17,7 +25,9 @@ export class WhisperSTTService {
   private tempAudioDir: string;
 
   constructor(apiKey?: string) {
-    this.tempAudioDir = path.join(app.getPath('temp'), 'ai-companion-audio');
+    // Use Electron's temp path if available, otherwise use Node's os.tmpdir()
+    const tempDir = app ? app.getPath('temp') : os.tmpdir();
+    this.tempAudioDir = path.join(tempDir, 'ai-companion-audio');
 
     // Create temp directory for audio files
     if (!fs.existsSync(this.tempAudioDir)) {
@@ -67,26 +77,41 @@ export class WhisperSTTService {
     }
 
     const startTime = Date.now();
+    let tempFilePath: string | null = null;
 
     try {
       // Write buffer to temporary file
-      const tempFilePath = path.join(
+      tempFilePath = path.join(
         this.tempAudioDir,
         `audio-${Date.now()}.webm`
       );
 
+      console.log(`[STT] Writing ${audioBuffer.length} bytes to ${tempFilePath}`);
       fs.writeFileSync(tempFilePath, audioBuffer);
+
+      const fileStats = fs.statSync(tempFilePath);
+      console.log(`[STT] File written successfully: ${fileStats.size} bytes`);
+
+      console.log(`[STT] Creating API request to OpenAI Whisper...`);
+      console.log(`[STT] API Key: ${this.openai!.apiKey.substring(0, 20)}...`);
 
       // Transcribe using Whisper API
       const transcription = await this.openai!.audio.transcriptions.create({
-        file: fs.createReadStream(tempFilePath),
+        file: fs.createReadStream(tempFilePath) as any,
         model: 'whisper-1',
         language: language,
         response_format: 'json',
+        prompt: '',
+        temperature: 0,
       });
 
+      console.log(`[STT] API response received`);
+
       // Clean up temp file
-      fs.unlinkSync(tempFilePath);
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+        console.log(`[STT] Temp file cleaned up`);
+      }
 
       const duration = Date.now() - startTime;
 
@@ -97,7 +122,23 @@ export class WhisperSTTService {
         duration,
       };
     } catch (error) {
-      console.error('Transcription error:', error);
+      console.error('[STT] Transcription error:', error);
+      console.error('[STT] Error details:', {
+        name: error instanceof Error ? error.name : 'Unknown',
+        message: error instanceof Error ? error.message : 'Unknown',
+        stack: error instanceof Error ? error.stack : 'No stack',
+      });
+
+      // Clean up temp file on error
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        try {
+          fs.unlinkSync(tempFilePath);
+          console.log(`[STT] Temp file cleaned up after error`);
+        } catch (cleanupError) {
+          console.error('[STT] Failed to clean up temp file:', cleanupError);
+        }
+      }
+
       throw new Error(`Failed to transcribe audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }

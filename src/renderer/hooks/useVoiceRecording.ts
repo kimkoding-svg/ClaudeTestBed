@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { transcribeAudio } from '../services/api';
 
 export interface VoiceRecordingState {
   isRecording: boolean;
@@ -117,11 +118,6 @@ export function useVoiceRecording(): UseVoiceRecordingReturn {
       mediaRecorderRef.current.start(100); // Collect data every 100ms
       startVolumeMonitoring();
 
-      // Notify backend
-      if (window.electronAPI) {
-        await window.electronAPI.startRecording();
-      }
-
       setState(prev => ({ ...prev, isRecording: true }));
       console.log('Recording started');
     } catch (error) {
@@ -155,35 +151,18 @@ export function useVoiceRecording(): UseVoiceRecordingReturn {
 
           console.log(`Recording stopped. Audio size: ${audioBlob.size} bytes`);
 
-          // Send to backend for transcription
-          if (window.electronAPI) {
-            const arrayBuffer = await audioBlob.arrayBuffer();
-            const uint8Array = new Uint8Array(arrayBuffer);
+          // Send to backend for transcription via HTTP API
+          const result = await transcribeAudio(audioBlob);
 
-            // Send audio data
-            await window.electronAPI.addAudioChunk?.(Array.from(uint8Array));
-
-            // Get transcription
-            const result = await window.electronAPI.stopRecording();
-
-            if (result.success && result.text) {
-              setState(prev => ({
-                ...prev,
-                transcript: result.text,
-                isProcessing: false,
-              }));
-              resolve(result.text);
-            } else {
-              throw new Error(result.error || 'Transcription failed');
-            }
-          } else {
-            // Fallback if electronAPI not available
+          if (result.success && result.text) {
             setState(prev => ({
               ...prev,
-              transcript: 'Voice recording completed (transcription unavailable)',
+              transcript: result.text,
               isProcessing: false,
             }));
-            resolve('Voice recording completed');
+            resolve(result.text);
+          } else {
+            throw new Error(result.error || 'Transcription failed');
           }
 
           // Clean up

@@ -1,7 +1,15 @@
 import OpenAI from 'openai';
 import fs from 'fs';
 import path from 'path';
-import { app } from 'electron';
+import os from 'os';
+
+// Try to import electron, but don't fail if not available
+let app: any = null;
+try {
+  app = require('electron').app;
+} catch {
+  // Not in Electron context, use Node.js alternatives
+}
 
 /**
  * OpenAITTSService - Text-to-Speech using OpenAI TTS API
@@ -20,7 +28,9 @@ export class OpenAITTSService {
   private defaultSpeed: number = 1.0;
 
   constructor(apiKey?: string) {
-    this.tempAudioDir = path.join(app.getPath('temp'), 'ai-companion-tts');
+    // Use Electron's temp path if available, otherwise use Node's os.tmpdir()
+    const tempDir = app ? app.getPath('temp') : os.tmpdir();
+    this.tempAudioDir = path.join(tempDir, 'ai-companion-tts');
 
     // Create temp directory for audio files
     if (!fs.existsSync(this.tempAudioDir)) {
@@ -95,9 +105,9 @@ export class OpenAITTSService {
     try {
       const voice = options?.voice || this.defaultVoice;
       const speed = options?.speed || this.defaultSpeed;
-      const model = options?.model || 'tts-1'; // Use standard quality for lower latency
+      const model = options?.model || 'tts-1-hd'; // HD for more natural sounding voice
 
-      console.log(`Synthesizing speech: "${text.substring(0, 50)}..." with voice: ${voice}`);
+      console.log(`Synthesizing speech: "${text.substring(0, 50)}..." with voice: ${voice}, model: ${model}`);
 
       const mp3 = await this.openai!.audio.speech.create({
         model: model,

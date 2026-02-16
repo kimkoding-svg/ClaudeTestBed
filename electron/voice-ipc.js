@@ -1,166 +1,182 @@
-const { ipcMain } = require('electron');
+const path = require('path');
 
 /**
- * Voice IPC Handlers
- *
- * Note: This file will be updated to integrate with compiled TypeScript voice services
- * once the build process is configured.
+ * Voice IPC Handlers - Integrated with TypeScript voice services
  */
 
-// Voice Pipeline Manager instance (will be initialized with TypeScript services)
+// Voice Pipeline Manager instance
 let voicePipelineManager = null;
-let audioRecordingBuffer = [];
 
 /**
- * Initialize voice pipeline with API key
+ * Initialize voice pipeline on first use
  */
-ipcMain.handle('voice:initialize', async (_event, config) => {
-  try {
-    console.log('Initializing voice pipeline...');
+function ensureVoicePipelineInitialized() {
+  if (!voicePipelineManager) {
+    // Auto-initialize with API key from environment
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY not found in environment variables');
+    }
 
-    // TODO: Initialize VoicePipelineManager when TypeScript services are compiled
-    // For now, return success
-    // const { getVoicePipelineManager } = require('../dist-electron/services/voice/VoicePipelineManager');
-    // voicePipelineManager = getVoicePipelineManager(config);
+    try {
+      const { getVoicePipelineManager } = require('../dist-electron/main/services/voice/VoicePipelineManager');
 
-    return { success: true, message: 'Voice pipeline initialized' };
-  } catch (error) {
-    console.error('Failed to initialize voice pipeline:', error);
-    return { success: false, error: error.message };
+      voicePipelineManager = getVoicePipelineManager({
+        openAIApiKey: apiKey,
+        sttLanguage: process.env.VOICE_STT_LANGUAGE || 'en',
+        ttsVoice: process.env.VOICE_TTS_VOICE || 'nova',
+        ttsSpeed: parseFloat(process.env.VOICE_TTS_SPEED || '1.0'),
+      });
+
+      console.log('VoicePipelineManager initialized successfully');
+    } catch (error) {
+      console.error('Failed to load VoicePipelineManager:', error);
+      throw new Error('Voice services not compiled. Run: npm run build:main');
+    }
   }
-});
+  return voicePipelineManager;
+}
 
 /**
- * Start recording audio
+ * Register voice IPC handlers
+ * @param {Electron.IpcMain} ipcMain - The ipcMain instance from electron
  */
-ipcMain.handle('voice:start-recording', async () => {
-  try {
-    console.log('Starting voice recording...');
-    audioRecordingBuffer = [];
+function registerVoiceHandlers(ipcMain) {
+  /**
+   * Initialize voice pipeline with API key
+   */
+  ipcMain.handle('voice:initialize', async (_event, config) => {
+    try {
+      console.log('Initializing voice pipeline...');
+      ensureVoicePipelineInitialized();
+      return { success: true, message: 'Voice pipeline initialized' };
+    } catch (error) {
+      console.error('Failed to initialize voice pipeline:', error);
+      return { success: false, error: error.message };
+    }
+  });
 
-    // TODO: Start recording with VoicePipelineManager
-    // if (voicePipelineManager) {
-    //   voicePipelineManager.startRecording();
-    // }
+  /**
+   * Start recording audio
+   */
+  ipcMain.handle('voice:start-recording', async () => {
+    try {
+      console.log('Starting voice recording...');
+      const manager = ensureVoicePipelineInitialized();
+      manager.startRecording();
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to start recording:', error);
+      return { success: false, error: error.message };
+    }
+  });
 
-    return { success: true };
-  } catch (error) {
-    console.error('Failed to start recording:', error);
-    return { success: false, error: error.message };
-  }
-});
+  /**
+   * Add audio chunk to recording
+   */
+  ipcMain.handle('voice:add-audio-chunk', async (_event, audioData) => {
+    try {
+      const manager = ensureVoicePipelineInitialized();
+      const buffer = Buffer.from(audioData);
+      manager.addAudioChunk(buffer);
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to add audio chunk:', error);
+      return { success: false, error: error.message };
+    }
+  });
 
-/**
- * Add audio chunk to recording
- */
-ipcMain.handle('voice:add-audio-chunk', async (_event, audioData) => {
-  try {
-    // Convert audio data to Buffer
-    const buffer = Buffer.from(audioData);
-    audioRecordingBuffer.push(buffer);
+  /**
+   * Stop recording and transcribe
+   */
+  ipcMain.handle('voice:stop-recording', async () => {
+    try {
+      console.log('Stopping voice recording and transcribing...');
+      const manager = ensureVoicePipelineInitialized();
+      const result = await manager.stopRecording();
 
-    // TODO: Add chunk to VoicePipelineManager
-    // if (voicePipelineManager) {
-    //   voicePipelineManager.addAudioChunk(buffer);
-    // }
+      console.log(`Transcription complete: "${result.text}" (${result.duration}ms)`);
 
-    return { success: true };
-  } catch (error) {
-    console.error('Failed to add audio chunk:', error);
-    return { success: false, error: error.message };
-  }
-});
+      return {
+        success: true,
+        text: result.text,
+        duration: result.duration
+      };
+    } catch (error) {
+      console.error('Failed to stop recording:', error);
+      return { success: false, error: error.message };
+    }
+  });
 
-/**
- * Stop recording and transcribe
- */
-ipcMain.handle('voice:stop-recording', async () => {
-  try {
-    console.log('Stopping voice recording and transcribing...');
+  /**
+   * Synthesize speech from text
+   */
+  ipcMain.handle('voice:synthesize-speech', async (_event, text, options = {}) => {
+    try {
+      console.log(`Synthesizing speech: "${text.substring(0, 50)}..."`);
+      const manager = ensureVoicePipelineInitialized();
 
-    // TODO: Stop recording and transcribe with VoicePipelineManager
-    // if (voicePipelineManager) {
-    //   const result = await voicePipelineManager.stopRecording();
-    //   return { success: true, text: result.text, duration: result.duration };
-    // }
+      const buffer = await manager.synthesizeSpeech(text, options.streaming || false);
 
-    // Placeholder response
-    return {
-      success: true,
-      text: 'Voice recording stopped (transcription service pending)',
-      duration: 0
-    };
-  } catch (error) {
-    console.error('Failed to stop recording:', error);
-    return { success: false, error: error.message };
-  }
-});
+      return {
+        success: true,
+        audioData: buffer ? Array.from(buffer) : []
+      };
+    } catch (error) {
+      console.error('Failed to synthesize speech:', error);
+      return { success: false, error: error.message };
+    }
+  });
 
-/**
- * Synthesize speech from text
- */
-ipcMain.handle('voice:synthesize-speech', async (_event, text, options = {}) => {
-  try {
-    console.log(`Synthesizing speech: "${text.substring(0, 50)}..."`);
+  /**
+   * Get voice pipeline status
+   */
+  ipcMain.handle('voice:get-status', async () => {
+    try {
+      if (!voicePipelineManager) {
+        return {
+          success: true,
+          isReady: false,
+          isRecording: false,
+        };
+      }
 
-    // TODO: Synthesize with VoicePipelineManager
-    // if (voicePipelineManager) {
-    //   const buffer = await voicePipelineManager.synthesizeSpeech(text, options.streaming);
-    //   return { success: true, audioData: Array.from(buffer) };
-    // }
+      return {
+        success: true,
+        isReady: voicePipelineManager.isReady(),
+        isRecording: voicePipelineManager.isCurrentlyRecording(),
+      };
+    } catch (error) {
+      console.error('Failed to get voice status:', error);
+      return { success: false, error: error.message };
+    }
+  });
 
-    // Placeholder response
-    return { success: true, audioData: [] };
-  } catch (error) {
-    console.error('Failed to synthesize speech:', error);
-    return { success: false, error: error.message };
-  }
-});
+  /**
+   * Update voice configuration
+   */
+  ipcMain.handle('voice:update-config', async (_event, config) => {
+    try {
+      console.log('Updating voice configuration...');
+      const manager = ensureVoicePipelineInitialized();
+      manager.updateConfig(config);
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to update voice config:', error);
+      return { success: false, error: error.message };
+    }
+  });
 
-/**
- * Get voice pipeline status
- */
-ipcMain.handle('voice:get-status', async () => {
-  try {
-    return {
-      success: true,
-      isReady: voicePipelineManager ? voicePipelineManager.isReady() : false,
-      isRecording: voicePipelineManager ? voicePipelineManager.isCurrentlyRecording() : false,
-    };
-  } catch (error) {
-    console.error('Failed to get voice status:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-/**
- * Update voice configuration
- */
-ipcMain.handle('voice:update-config', async (_event, config) => {
-  try {
-    console.log('Updating voice configuration...');
-
-    // TODO: Update config with VoicePipelineManager
-    // if (voicePipelineManager) {
-    //   voicePipelineManager.updateConfig(config);
-    // }
-
-    return { success: true };
-  } catch (error) {
-    console.error('Failed to update voice config:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-console.log('Voice IPC handlers registered');
+  console.log('Voice IPC handlers registered');
+}
 
 module.exports = {
+  registerVoiceHandlers,
   // Export for potential cleanup
   cleanup: () => {
     if (voicePipelineManager) {
       voicePipelineManager.cleanup();
       voicePipelineManager = null;
     }
-    audioRecordingBuffer = [];
   }
 };
