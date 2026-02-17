@@ -53,8 +53,16 @@ if (process.env.NODE_ENV === 'production') {
 // API Routes
 const voiceRouter = require('./routes/voice');
 const conversationRouter = require('./routes/conversation');
+const documentsRouter = require('./routes/documents');
+const pdfRouter = require('./routes/pdf');
+const agentsRouter = require('./routes/agents');
+const socialRouter = require('./routes/social');
 app.use('/api/voice', voiceRouter);
 app.use('/api/conversation', conversationRouter);
+app.use('/api/documents', documentsRouter);
+app.use('/api/pdf', pdfRouter);
+app.use('/api/agents', agentsRouter);
+app.use('/api/social', socialRouter);
 
 /**
  * @swagger
@@ -89,23 +97,39 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   logger.info(`🚀 Server listening on http://localhost:${PORT}`);
   logger.info(`📡 API endpoints: http://localhost:${PORT}/api`);
   logger.info(`📚 API docs: http://localhost:${PORT}/api-docs`);
   logger.info(`🎤 Voice services: ${process.env.OPENAI_API_KEY ? 'Configured ✓' : 'Not configured ✗'}`);
-  logger.info(`📝 Logs: c:\\logs\\claude\\test.log (10MB chunks, max 100 files)`);
+  logger.info(`Logs: c:\\logs\\office-simulator-YYYY-MM-DD.log (20MB chunks, max 50 files)`);
+  logger.info('Routes mounted: voice, conversation, documents, pdf, agents, social');
 
-  // Also console log for visibility
-  console.log(`\n🚀 AI Companion Server running on http://localhost:${PORT}`);
-  console.log(`📡 API endpoints available at http://localhost:${PORT}/api`);
-  console.log(`📚 API Documentation at http://localhost:${PORT}/api-docs`);
-  console.log(`🎤 Voice services: ${process.env.OPENAI_API_KEY ? 'Configured ✓' : 'Not configured ✗'}`);
-  console.log(`📝 Logging to: c:\\logs\\claude\\test.log\n`);
+  // Try to auto-start local Kokoro TTS if setup is complete
+  try {
+    const kokoroManager = require('./local-tts/manager');
+    if (kokoroManager.isSetupComplete()) {
+      logger.info('Local TTS (Kokoro): Setup detected, starting...');
+      await kokoroManager.startServer();
+    } else {
+      logger.info('Local TTS (Kokoro): Not set up');
+    }
+  } catch (err) {
+    logger.warn('Local TTS (Kokoro): Not available', { error: err.message });
+  }
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  logger.info('Server shutting down (SIGINT)');
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  logger.info('Server shutting down (SIGTERM)');
+  process.exit(0);
 });
 
 // Error handling
 process.on('unhandledRejection', (error) => {
   logger.error('Unhandled rejection:', error);
-  console.error('Unhandled rejection:', error);
 });

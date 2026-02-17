@@ -8,7 +8,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
-      '@renderer': path.resolve(__dirname, './src/renderer'),
+      '@sakura': path.resolve(__dirname, './src/sakura'),
+      '@office': path.resolve(__dirname, './src/office-social-simulator'),
       '@shared': path.resolve(__dirname, './src/shared')
     }
   },

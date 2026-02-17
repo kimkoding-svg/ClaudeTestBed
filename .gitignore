@@ -50,3 +50,9 @@ logs
 
 # TypeScript
 *.tsbuildinfo
+
+# Local TTS model files
+server/local-tts/venv/
+server/local-tts/*.onnx
+server/local-tts/*.bin
+server/local-tts/__pycache__/

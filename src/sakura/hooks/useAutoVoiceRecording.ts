@@ -21,6 +21,11 @@ interface UseAutoVoiceRecordingProps {
   silenceThreshold?: number;
   silenceDuration?: number;
   minRecordingDuration?: number;
+  maxRecordingDuration?: number;
+  /** Extra silence allowed per second of speech already recorded */
+  silenceGrowthPerSecond?: number;
+  /** Maximum silence duration cap (even with growth) */
+  maxSilenceDuration?: number;
 }
 
 export function useAutoVoiceRecording({
@@ -28,6 +33,9 @@ export function useAutoVoiceRecording({
   silenceThreshold = 0.1,
   silenceDuration = 1500,
   minRecordingDuration = 500,
+  maxRecordingDuration = 120000,
+  silenceGrowthPerSecond = 200,
+  maxSilenceDuration = 6000,
 }: UseAutoVoiceRecordingProps = {}): UseAutoVoiceRecordingReturn {
   const [state, setState] = useState<AutoVoiceRecordingState>({
     isListening: false,
@@ -198,7 +206,13 @@ export function useAutoVoiceRecording({
       } else {
         // Silence detected
         if (isRecordingRef.current && !silenceTimerRef.current) {
-          console.log(`🔇 Silence detected, will stop in ${silenceDuration}ms if continued...`);
+          // Dynamic silence: longer recordings get more patience for pauses
+          const recordingSoFar = (Date.now() - recordingStartTimeRef.current) / 1000;
+          const dynamicSilence = Math.min(
+            silenceDuration + recordingSoFar * silenceGrowthPerSecond,
+            maxSilenceDuration
+          );
+          console.log(`🔇 Silence detected, will stop in ${Math.round(dynamicSilence)}ms if continued (recording: ${recordingSoFar.toFixed(1)}s)...`);
           silenceTimerRef.current = setTimeout(() => {
             const duration = Date.now() - recordingStartTimeRef.current;
             console.log(`⏹️ Stopping recording after ${duration}ms (min required: ${minRecordingDuration}ms)`);
@@ -208,7 +222,20 @@ export function useAutoVoiceRecording({
               console.log('⚠️ Recording too short, not stopping');
             }
             silenceTimerRef.current = null;
-          }, silenceDuration);
+          }, dynamicSilence);
+        }
+      }
+
+      // Safety: stop recording if it exceeds max duration
+      if (isRecordingRef.current) {
+        const elapsed = Date.now() - recordingStartTimeRef.current;
+        if (elapsed >= maxRecordingDuration) {
+          console.log(`⏹️ Max recording duration reached (${maxRecordingDuration}ms), stopping`);
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+          }
+          stopRecording();
         }
       }
 
@@ -216,7 +243,7 @@ export function useAutoVoiceRecording({
     };
 
     checkAudioLevel();
-  }, [silenceThreshold, silenceDuration, minRecordingDuration, startRecording, stopRecording]);
+  }, [silenceThreshold, silenceDuration, minRecordingDuration, maxRecordingDuration, silenceGrowthPerSecond, maxSilenceDuration, startRecording, stopRecording]);
 
   const startListening = useCallback(async () => {
     try {

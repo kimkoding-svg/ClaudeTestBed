@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
+const { getSystemPrompt } = require('../expertise');
+const { getAllToolDefinitions, dispatchToolCall } = require('../tools');
+const log = require('../logger').child('CONVERSATION');
 
 // Initialize Anthropic client
 let anthropic = null;
@@ -15,12 +18,14 @@ function getAnthropicClient() {
   return anthropic;
 }
 
+// Active expertise modules for this server instance
+const ACTIVE_EXPERTISE = ['sa-tax'];
+
 // Web search function using DuckDuckGo
 async function searchWeb(query) {
   try {
-    console.log(`🔍 Searching web for: "${query}"`);
+    log.info('Web search', { query });
 
-    // Use DuckDuckGo Instant Answer API
     const response = await axios.get('https://api.duckduckgo.com/', {
       params: {
         q: query,
@@ -34,7 +39,6 @@ async function searchWeb(query) {
     const data = response.data;
     let results = [];
 
-    // Extract relevant results
     if (data.Abstract) {
       results.push({
         title: data.Heading || 'Result',
@@ -43,7 +47,6 @@ async function searchWeb(query) {
       });
     }
 
-    // Add related topics
     if (data.RelatedTopics && data.RelatedTopics.length > 0) {
       data.RelatedTopics.slice(0, 3).forEach(topic => {
         if (topic.Text && topic.FirstURL) {
@@ -56,9 +59,8 @@ async function searchWeb(query) {
       });
     }
 
-    console.log(`✓ Found ${results.length} search results`);
+    log.info('Web search results', { query, count: results.length });
 
-    // If no results found, provide helpful message
     if (results.length === 0) {
       return {
         query,
@@ -69,10 +71,10 @@ async function searchWeb(query) {
 
     return {
       query,
-      results: results.slice(0, 5) // Limit to 5 results
+      results: results.slice(0, 5)
     };
   } catch (error) {
-    console.error('Web search error:', error.message);
+    log.error('Web search failed', { query, error: error.message });
     return {
       query,
       results: [],
@@ -141,7 +143,6 @@ router.post('/chat', async (req, res) => {
       });
     }
 
-    // Build conversation history for Claude
     const messages = [
       ...history.map(msg => ({
         role: msg.role,
@@ -153,31 +154,17 @@ router.post('/chat', async (req, res) => {
       }
     ];
 
-    console.log(`💬 Sending message to Claude: "${message}"`);
+    log.info('Chat request', { messageLength: message.length, historyLength: history.length });
 
-    // Call Claude API
     const response = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
-      system: `You are Sakura, a friendly and helpful woman.
-
-- Be warm, natural, and conversational
-- Keep responses concise (1-3 sentences typically)
-- Be genuinely helpful and straightforward
-- No need for formality - just be a normal, kind person
-
-USER CONTEXT:
-- User is located in Cape Town, South Africa
-
-TOOLS AVAILABLE:
-- You can search the web when you need current information
-- Use web search for: news, facts, prices, weather, events, or anything time-sensitive
-- Be proactive - if something requires current info, search for it`,
+      system: getSystemPrompt(ACTIVE_EXPERTISE),
       messages: messages,
     });
 
     const assistantMessage = response.content[0].text;
-    console.log(`✅ Claude responded: "${assistantMessage.substring(0, 100)}..."`);
+    log.info('Chat response', { responseLength: assistantMessage.length });
 
     res.json({
       success: true,
@@ -185,7 +172,7 @@ TOOLS AVAILABLE:
     });
 
   } catch (error) {
-    console.error('Conversation error:', error);
+    log.error('Chat endpoint error', { error: error.message });
     res.status(500).json({
       success: false,
       error: error.message
@@ -222,7 +209,7 @@ router.post('/chat-stream', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { message, history = [] } = req.body;
+    const { message, history = [], personality } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'Message is required' });
@@ -240,7 +227,6 @@ router.post('/chat-stream', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    // Build conversation history
     const messages = [
       ...history.map(msg => ({
         role: msg.role,
@@ -252,7 +238,10 @@ router.post('/chat-stream', async (req, res) => {
       }
     ];
 
-    console.log(`💬 [STREAM] Starting Claude streaming for: "${message}"`);
+    const systemPrompt = getSystemPrompt(ACTIVE_EXPERTISE, personality || null);
+    const tools = getAllToolDefinitions();
+
+    log.info('Stream request', { messageLength: message.length, historyLength: history.length });
 
     // Send initial timing event
     res.write(`data: ${JSON.stringify({
@@ -263,278 +252,227 @@ router.post('/chat-stream', async (req, res) => {
     })}\n\n`);
 
     let fullResponse = '';
-    let currentSentence = '';
     let sentenceCount = 0;
     let firstTokenTime = null;
     let lastTokenTime = startTime;
 
-    // Call Claude API with streaming and tools
-    const stream = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      system: `You are Sakura, a friendly and helpful woman.
+    // Tool-use loop: Claude may call multiple tools sequentially
+    let maxToolRounds = 5;
+    let toolRound = 0;
 
-- Be warm, natural, and conversational
-- Keep responses concise (1-3 sentences typically)
-- Be genuinely helpful and straightforward
-- No need for formality - just be a normal, kind person
+    while (toolRound < maxToolRounds) {
+      toolRound++;
+      let currentSentence = '';
+      let toolUseBlocks = []; // collect all tool_use blocks from this round
+      let textContent = '';
+      let currentToolId = null;
+      let currentToolName = null;
+      let currentToolInput = '';
 
-USER CONTEXT:
-- User is located in Cape Town, South Africa
+      const stream = await client.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2048,
+        system: systemPrompt,
+        messages: messages,
+        tools: tools,
+        stream: true,
+      });
 
-TOOLS AVAILABLE:
-- You can search the web when you need current information
-- Use web search for: news, facts, prices, weather, events, or anything time-sensitive
-- Be proactive - if something requires current info, search for it`,
-      messages: messages,
-      tools: [
-        {
-          name: "web_search",
-          description: "Search the web for current information, news, facts, weather, prices, or any time-sensitive data. Use this when you need up-to-date information that you don't already know.",
-          input_schema: {
-            type: "object",
-            properties: {
-              query: {
-                type: "string",
-                description: "The search query to look up on the web"
-              }
-            },
-            required: ["query"]
-          }
+      let stopReason = null;
+
+      for await (const event of stream) {
+        const now = Date.now();
+
+        // Track message-level stop reason
+        if (event.type === 'message_delta' && event.delta.stop_reason) {
+          stopReason = event.delta.stop_reason;
         }
-      ],
-      stream: true,
-    });
 
-    let toolUseId = null;
-    let toolUseName = null;
-    let toolUseInput = '';
+        // Handle tool_use block start
+        if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+          currentToolId = event.content_block.id;
+          currentToolName = event.content_block.name;
+          currentToolInput = '';
+          log.info('Tool use started', { tool: currentToolName });
+        }
 
-    for await (const event of stream) {
-      const now = Date.now();
+        // Accumulate tool input JSON
+        if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
+          currentToolInput += event.delta.partial_json;
+        }
 
-      // Handle tool use
-      if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-        toolUseId = event.content_block.id;
-        toolUseName = event.content_block.name;
-        toolUseInput = '';
-        console.log(`🔧 Tool use started: ${toolUseName}`);
-      }
-
-      if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
-        toolUseInput += event.delta.partial_json;
-      }
-
-      if (event.type === 'content_block_stop' && toolUseName) {
-        try {
-          const input = JSON.parse(toolUseInput);
-          console.log(`🔧 Executing ${toolUseName} with:`, input);
-
-          let toolResult;
-          if (toolUseName === 'web_search') {
-            const searchResults = await searchWeb(input.query);
-            toolResult = JSON.stringify(searchResults, null, 2);
-
-            // Send search results to frontend
-            const searchResultsEvent = {
-              type: 'search_results',
-              query: input.query,
-              results: searchResults.results || [],
-              message: searchResults.message,
-              timestamp: Date.now()
-            };
-            console.log(`📤 Sending search results to frontend:`, JSON.stringify(searchResultsEvent));
-            res.write(`data: ${JSON.stringify(searchResultsEvent)}\n\n`);
-          }
-
-          // Make a new API call with the tool result
-          console.log(`🔧 Sending tool result back to Claude`);
-
-          messages.push({
-            role: 'assistant',
-            content: [{
+        // Tool block complete - store it
+        if (event.type === 'content_block_stop' && currentToolName) {
+          try {
+            const input = JSON.parse(currentToolInput);
+            toolUseBlocks.push({
               type: 'tool_use',
-              id: toolUseId,
-              name: toolUseName,
-              input: input
-            }]
-          });
+              id: currentToolId,
+              name: currentToolName,
+              input: input,
+            });
+          } catch (e) {
+            log.error('Tool input parse failed', { tool: currentToolName, error: e.message });
+          }
+          currentToolName = null;
+          currentToolId = null;
+          currentToolInput = '';
+        }
 
-          messages.push({
-            role: 'user',
-            content: [{
-              type: 'tool_result',
-              tool_use_id: toolUseId,
-              content: toolResult
-            }]
-          });
+        // Handle text streaming
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          const text = event.delta.text;
 
-          // Continue streaming with the tool result
-          const continueStream = await client.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 1024,
-            system: `You are Sakura, a friendly and helpful woman.
+          if (!firstTokenTime) {
+            firstTokenTime = now;
+            const ttft = firstTokenTime - startTime;
+            log.debug('TTFT', { ttft: ttft + 'ms' });
 
-- Be warm, natural, and conversational
-- Keep responses concise (1-3 sentences typically)
-- Be genuinely helpful and straightforward
-- No need for formality - just be a normal, kind person
-
-USER CONTEXT:
-- User is located in Cape Town, South Africa
-
-TOOLS AVAILABLE:
-- You can search the web when you need current information
-- Use web search for: news, facts, prices, weather, events, or anything time-sensitive
-- Be proactive - if something requires current info, search for it`,
-            messages: messages,
-            tools: [
-              {
-                name: "web_search",
-                description: "Search the web for current information, news, facts, weather, prices, or any time-sensitive data.",
-                input_schema: {
-                  type: "object",
-                  properties: {
-                    query: {
-                      type: "string",
-                      description: "The search query"
-                    }
-                  },
-                  required: ["query"]
-                }
-              }
-            ],
-            stream: true,
-          });
-
-          // Continue streaming from the new response
-          for await (const continueEvent of continueStream) {
-            if (continueEvent.type === 'content_block_delta' && continueEvent.delta.type === 'text_delta') {
-              const text = continueEvent.delta.text;
-              fullResponse += text;
-              currentSentence += text;
-              lastTokenTime = Date.now();
-
-              if (!firstTokenTime) {
-                firstTokenTime = Date.now();
-              }
-
-              // Detect sentence boundaries
-              if (text.match(/[.!?。！？]\s*$/)) {
-                sentenceCount++;
-                const sentence = currentSentence.trim();
-                console.log(`📝 [STREAM] Sentence ${sentenceCount}: "${sentence}"`);
-
-                res.write(`data: ${JSON.stringify({
-                  type: 'sentence',
-                  text: sentence,
-                  index: sentenceCount,
-                  timestamp: Date.now(),
-                  elapsed: Date.now() - startTime
-                })}\n\n`);
-
-                currentSentence = '';
-              } else {
-                res.write(`data: ${JSON.stringify({
-                  type: 'token',
-                  text: text
-                })}\n\n`);
-              }
-            }
+            res.write(`data: ${JSON.stringify({
+              type: 'timing',
+              stage: 'first_token',
+              timestamp: now,
+              elapsed: ttft,
+              metric: 'Time to First Token (TTFT)'
+            })}\n\n`);
           }
 
-          toolUseName = null;
-          toolUseId = null;
-          toolUseInput = '';
-        } catch (error) {
-          console.error('Tool execution error:', error);
+          fullResponse += text;
+          currentSentence += text;
+          textContent += text;
+          lastTokenTime = now;
+
+          // Check for sentence boundaries
+          const sentenceEnders = /[.!?]+[\s\n]/;
+          if (sentenceEnders.test(currentSentence)) {
+            const sentence = currentSentence.trim();
+            sentenceCount++;
+
+            log.debug('Sentence complete', { index: sentenceCount });
+
+            res.write(`data: ${JSON.stringify({
+              type: 'sentence',
+              text: sentence,
+              index: sentenceCount,
+              timestamp: now,
+              elapsed: now - startTime
+            })}\n\n`);
+
+            currentSentence = '';
+          } else {
+            res.write(`data: ${JSON.stringify({
+              type: 'token',
+              text: text
+            })}\n\n`);
+          }
         }
       }
 
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        const text = event.delta.text;
+      // Send any remaining text as final sentence
+      if (currentSentence.trim()) {
+        sentenceCount++;
+        const sentence = currentSentence.trim();
 
-        // Record first token time
-        if (!firstTokenTime) {
-          firstTokenTime = now;
-          const ttft = firstTokenTime - startTime;
-          console.log(`⚡ [STREAM] First token received: ${ttft}ms`);
+        log.debug('Final sentence', { index: sentenceCount });
 
-          res.write(`data: ${JSON.stringify({
-            type: 'timing',
-            stage: 'first_token',
-            timestamp: now,
-            elapsed: ttft,
-            metric: 'Time to First Token (TTFT)'
-          })}\n\n`);
-        }
-
-        fullResponse += text;
-        currentSentence += text;
-        lastTokenTime = now;
-
-        // Check for sentence boundaries
-        const sentenceEnders = /[.!?]+[\s\n]/;
-        if (sentenceEnders.test(currentSentence)) {
-          const sentence = currentSentence.trim();
-          sentenceCount++;
-
-          console.log(`📝 [STREAM] Sentence ${sentenceCount} complete: "${sentence.substring(0, 50)}..."`);
-
-          // Send complete sentence for TTS
-          res.write(`data: ${JSON.stringify({
-            type: 'sentence',
-            text: sentence,
-            index: sentenceCount,
-            timestamp: now,
-            elapsed: now - startTime
-          })}\n\n`);
-
-          currentSentence = '';
-        } else {
-          // Send partial text update
-          res.write(`data: ${JSON.stringify({
-            type: 'token',
-            text: text
-          })}\n\n`);
-        }
+        res.write(`data: ${JSON.stringify({
+          type: 'sentence',
+          text: sentence,
+          index: sentenceCount,
+          timestamp: Date.now(),
+          elapsed: Date.now() - startTime
+        })}\n\n`);
       }
-    }
 
-    // Send any remaining text as final sentence
-    if (currentSentence.trim()) {
-      sentenceCount++;
-      const sentence = currentSentence.trim();
+      // If no tools were called, we're done
+      if (toolUseBlocks.length === 0) {
+        break;
+      }
 
-      console.log(`📝 [STREAM] Final sentence ${sentenceCount}: "${sentence}"`);
+      // Process tool calls
+      log.info('Processing tools', { count: toolUseBlocks.length, round: toolRound });
 
-      res.write(`data: ${JSON.stringify({
-        type: 'sentence',
-        text: sentence,
-        index: sentenceCount,
-        timestamp: Date.now(),
-        elapsed: Date.now() - startTime
-      })}\n\n`);
+      // Build assistant message content (text + tool_use blocks)
+      const assistantContent = [];
+      if (textContent) {
+        assistantContent.push({ type: 'text', text: textContent });
+      }
+      assistantContent.push(...toolUseBlocks);
+
+      messages.push({
+        role: 'assistant',
+        content: assistantContent,
+      });
+
+      // Execute each tool and collect results
+      const toolResults = [];
+      for (const toolBlock of toolUseBlocks) {
+        const result = await dispatchToolCall(toolBlock.name, toolBlock.input, { searchWeb });
+
+        // Send search results to frontend if it was a web search
+        if (toolBlock.name === 'web_search') {
+          res.write(`data: ${JSON.stringify({
+            type: 'search_results',
+            query: toolBlock.input.query,
+            results: result.results || [],
+            message: result.message,
+            timestamp: Date.now()
+          })}\n\n`);
+        }
+
+        // Send tool event to frontend for tax calculations
+        if (toolBlock.name === 'calculate_tax' || toolBlock.name === 'calculate_vat') {
+          res.write(`data: ${JSON.stringify({
+            type: 'tool_result',
+            tool: toolBlock.name,
+            result: result,
+            timestamp: Date.now()
+          })}\n\n`);
+        }
+
+        // Send PDF generated event
+        if (toolBlock.name === 'generate_tax_document' && result.success) {
+          res.write(`data: ${JSON.stringify({
+            type: 'pdf_generated',
+            pdf_id: result.pdf_id,
+            download_url: result.download_url,
+            taxpayer_name: toolBlock.input.taxpayer_name,
+            timestamp: Date.now()
+          })}\n\n`);
+        }
+
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: JSON.stringify(result, null, 2),
+        });
+      }
+
+      messages.push({
+        role: 'user',
+        content: toolResults,
+      });
+
+      // Reset for next round - Claude will respond to the tool results
+      fullResponse += ''; // Continue accumulating
     }
 
     const totalTime = Date.now() - startTime;
-    const streamingTime = lastTokenTime - firstTokenTime;
+    const streamingTime = lastTokenTime - (firstTokenTime || startTime);
 
-    console.log(`✅ [STREAM] Complete: ${totalTime}ms total, ${sentenceCount} sentences`);
-    console.log(`   ├─ TTFT: ${firstTokenTime - startTime}ms`);
-    console.log(`   ├─ Streaming: ${streamingTime}ms`);
-    console.log(`   └─ Full response: "${fullResponse.substring(0, 100)}..."`);
+    log.info('Stream complete', { totalTime: totalTime + 'ms', sentences: sentenceCount, toolRounds: toolRound, ttft: firstTokenTime ? (firstTokenTime - startTime) + 'ms' : null, streamingTime: streamingTime + 'ms' });
 
-    // Send completion event with full metrics
+    // Send completion event
     res.write(`data: ${JSON.stringify({
       type: 'done',
       fullResponse: fullResponse,
       sentenceCount: sentenceCount,
       metrics: {
         totalTime: totalTime,
-        ttft: firstTokenTime - startTime,
+        ttft: firstTokenTime ? firstTokenTime - startTime : 0,
         streamingTime: streamingTime,
-        tokensPerSecond: Math.round((fullResponse.length / streamingTime) * 1000)
+        tokensPerSecond: streamingTime > 0 ? Math.round((fullResponse.length / streamingTime) * 1000) : 0,
+        toolRounds: toolRound,
       },
       timestamp: Date.now()
     })}\n\n`);
@@ -542,7 +480,7 @@ TOOLS AVAILABLE:
     res.end();
 
   } catch (error) {
-    console.error('❌ [STREAM] Error:', error);
+    log.error('Stream error', { error: error.message });
     res.write(`data: ${JSON.stringify({
       type: 'error',
       error: error.message

@@ -42,9 +42,10 @@ export async function transcribeAudio(audioBlob: Blob): Promise<TranscriptionRes
 }
 
 export interface VoiceOptions {
-  voice?: 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer';
+  voice?: string;
   speed?: number;
   model?: 'tts-1' | 'tts-1-hd';
+  provider?: 'openai' | 'kokoro';
 }
 
 /**
@@ -59,6 +60,31 @@ export async function synthesizeSpeech(text: string, streaming = false, options?
     body: JSON.stringify({ text, streaming, ...options }),
   });
 
+  return response.json();
+}
+
+/**
+ * Check Kokoro local TTS status
+ */
+export async function getKokoroStatus(): Promise<{
+  available: boolean;
+  setupComplete: boolean;
+  gpu?: boolean;
+  status?: string;
+}> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/voice/kokoro/status`);
+    return response.json();
+  } catch {
+    return { available: false, setupComplete: false };
+  }
+}
+
+/**
+ * Start Kokoro local TTS server
+ */
+export async function startKokoro(): Promise<{ success: boolean; available: boolean }> {
+  const response = await fetch(`${API_BASE_URL}/voice/kokoro/start`, { method: 'POST' });
   return response.json();
 }
 
@@ -109,7 +135,7 @@ export async function sendChatMessage(
 }
 
 export interface StreamEvent {
-  type: 'timing' | 'token' | 'sentence' | 'done' | 'error' | 'search_results';
+  type: 'timing' | 'token' | 'sentence' | 'done' | 'error' | 'search_results' | 'tool_result' | 'pdf_generated';
   text?: string;
   stage?: string;
   elapsed?: number;
@@ -123,6 +149,7 @@ export interface StreamEvent {
     ttft: number;
     streamingTime: number;
     tokensPerSecond: number;
+    toolRounds?: number;
   };
   error?: string;
   // Search results fields
@@ -133,6 +160,63 @@ export interface StreamEvent {
     url: string;
   }>;
   message?: string;
+  // Tool result fields
+  tool?: string;
+  result?: any;
+  // PDF generated fields
+  pdf_id?: string;
+  download_url?: string;
+  taxpayer_name?: string;
+}
+
+export interface DocumentUploadResult {
+  success: boolean;
+  document_id?: string;
+  filename?: string;
+  fileType?: string;
+  summary?: {
+    rows: number;
+    pages: number | null;
+    incomeItems: number;
+    expenseItems: number;
+    totalIncome: number;
+    totalExpenses: number;
+  };
+  message?: string;
+  error?: string;
+}
+
+/**
+ * Upload a document for analysis
+ */
+export async function uploadDocument(file: File): Promise<DocumentUploadResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch(`${API_BASE_URL}/documents/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  return response.json();
+}
+
+/**
+ * Get PDF download URL
+ */
+export function getPDFDownloadURL(pdfId: string): string {
+  return `${API_BASE_URL}/pdf/${pdfId}`;
+}
+
+export interface PersonalityConfig {
+  preset: string;
+  traits: {
+    warmth: number;
+    humor: number;
+    formality: number;
+    directness: number;
+    energy: number;
+  };
 }
 
 /**
@@ -142,14 +226,15 @@ export async function sendChatMessageStream(
   message: string,
   history: ChatMessage[],
   onEvent: (event: StreamEvent) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  personality?: PersonalityConfig
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/conversation/chat-stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ message, history }),
+    body: JSON.stringify({ message, history, personality }),
     signal,
   });
 

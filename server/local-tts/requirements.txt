@@ -1,0 +1,5 @@
+kokoro-onnx[gpu]
+fastapi
+uvicorn[standard]
+soundfile
+numpy

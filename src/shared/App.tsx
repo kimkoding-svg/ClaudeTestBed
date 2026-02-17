@@ -1,7 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { WaveformVisualizer } from './components/VoiceInterface/WaveformVisualizer';
-import { useAutoVoiceRecording } from './hooks/useAutoVoiceRecording';
-import { sendChatMessageStream, synthesizeSpeech, type ChatMessage, type StreamEvent, type VoiceOptions } from './services/api';
+import { WaveformVisualizer } from '../sakura/components/VoiceInterface/WaveformVisualizer';
+import { useAutoVoiceRecording } from '../sakura/hooks/useAutoVoiceRecording';
+import { sendChatMessageStream, synthesizeSpeech, uploadDocument, getPDFDownloadURL, getKokoroStatus, type ChatMessage, type StreamEvent, type VoiceOptions } from '../sakura/services/api';
+import { LandingPage } from './pages/LandingPage';
+import { SocialSimPage } from '../office-social-simulator/pages/SocialSimPage';
 
 interface PerformanceMetrics {
   ttft?: number; // Time to First Token
@@ -33,24 +35,128 @@ interface LogEntry {
   color: string;
 }
 
-function App() {
+// --- Personality system ---
+export interface PersonalityTraits {
+  warmth: number;    // 0 = cold/distant, 100 = warm/affectionate
+  humor: number;     // 0 = serious, 100 = playful/witty
+  formality: number; // 0 = casual, 100 = formal/professional
+  directness: number;// 0 = gentle/diplomatic, 100 = blunt/direct
+  energy: number;    // 0 = calm/mellow, 100 = energetic/enthusiastic
+}
+
+export interface PersonalitySettings {
+  preset: string;
+  traits: PersonalityTraits;
+}
+
+const PERSONALITY_PRESETS: Record<string, { label: string; desc: string; traits: PersonalityTraits }> = {
+  friendly: {
+    label: 'Friendly',
+    desc: 'Warm, casual, genuine',
+    traits: { warmth: 75, humor: 60, formality: 20, directness: 60, energy: 60 },
+  },
+  professional: {
+    label: 'Professional',
+    desc: 'Polished, precise, composed',
+    traits: { warmth: 40, humor: 20, formality: 85, directness: 80, energy: 40 },
+  },
+  playful: {
+    label: 'Playful',
+    desc: 'Witty, fun, lighthearted',
+    traits: { warmth: 80, humor: 90, formality: 10, directness: 50, energy: 85 },
+  },
+  sarcastic: {
+    label: 'Sarcastic',
+    desc: 'Dry wit, sharp, edgy',
+    traits: { warmth: 30, humor: 85, formality: 15, directness: 90, energy: 55 },
+  },
+  mentor: {
+    label: 'Mentor',
+    desc: 'Patient, encouraging, wise',
+    traits: { warmth: 80, humor: 35, formality: 45, directness: 65, energy: 45 },
+  },
+  custom: {
+    label: 'Custom',
+    desc: 'Your own mix',
+    traits: { warmth: 50, humor: 50, formality: 50, directness: 50, energy: 50 },
+  },
+};
+
+const DEFAULT_PERSONALITY: PersonalitySettings = {
+  preset: 'friendly',
+  traits: { ...PERSONALITY_PRESETS.friendly.traits },
+};
+
+// --- Settings persistence via localStorage ---
+const SETTINGS_KEY = 'sakura-settings';
+
+interface SavedSettings {
+  ttsProvider: 'openai' | 'kokoro';
+  voiceSettings: VoiceOptions;
+  showMetrics: boolean;
+  showLogs: boolean;
+  personality: PersonalitySettings;
+}
+
+const DEFAULT_SETTINGS: SavedSettings = {
+  ttsProvider: 'openai',
+  voiceSettings: { voice: 'nova', speed: 1.0, model: 'tts-1-hd', provider: 'openai' },
+  showMetrics: true,
+  showLogs: true,
+  personality: DEFAULT_PERSONALITY,
+};
+
+function loadSettings(): SavedSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const merged = { ...DEFAULT_SETTINGS, ...parsed };
+      // Ensure voiceSettings.provider and ttsProvider stay in sync
+      if (parsed.voiceSettings?.provider) {
+        merged.ttsProvider = parsed.voiceSettings.provider;
+      }
+      console.log('[Settings] Loaded from localStorage:', JSON.stringify(merged));
+      return merged;
+    }
+  } catch (e) {
+    console.warn('Failed to load settings from localStorage:', e);
+  }
+  return DEFAULT_SETTINGS;
+}
+
+function saveSettings(settings: Partial<SavedSettings>) {
+  try {
+    const current = loadSettings();
+    const merged = { ...current, ...settings };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
+  } catch (e) {
+    console.warn('Failed to save settings to localStorage:', e);
+  }
+}
+
+function SakuraApp({ onBack }: { onBack: () => void }) {
+  // Lazy initializers - only run once per mount, persist across page reloads
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [currentMetrics, setCurrentMetrics] = useState<PerformanceMetrics | null>(null);
-  const [showMetrics, setShowMetrics] = useState(true);
+  const [showMetrics, setShowMetrics] = useState(() => loadSettings().showMetrics);
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [showLogs, setShowLogs] = useState(true);
+  const [showLogs, setShowLogs] = useState(() => loadSettings().showLogs);
   const [showSettings, setShowSettings] = useState(false);
-  const [voiceSettings, setVoiceSettings] = useState<VoiceOptions>({
-    voice: 'nova',
-    speed: 1.0,
-    model: 'tts-1-hd',
-  });
-  const voiceSettingsRef = useRef<VoiceOptions>({ voice: 'nova', speed: 1.0, model: 'tts-1-hd' });
+  const [ttsProvider, setTtsProvider] = useState<'openai' | 'kokoro'>(() => loadSettings().ttsProvider);
+  const [kokoroAvailable, setKokoroAvailable] = useState(false);
+  const [kokoroGpu, setKokoroGpu] = useState(false);
+  const [voiceSettings, setVoiceSettings] = useState<VoiceOptions>(() => loadSettings().voiceSettings);
+  const voiceSettingsRef = useRef<VoiceOptions>(loadSettings().voiceSettings);
+  const [personality, setPersonality] = useState<PersonalitySettings>(() => loadSettings().personality);
   const [searchResults, setSearchResults] = useState<SearchResultData | null>(null);
   const [sessionStarted, setSessionStarted] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [pdfDownloads, setPdfDownloads] = useState<Array<{ id: string; url: string; name: string }>>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -178,6 +284,36 @@ function App() {
     }
     return true;
   };
+
+  // Keep voiceSettingsRef in sync with state (covers initial load and all updates)
+  useEffect(() => {
+    voiceSettingsRef.current = voiceSettings;
+  }, [voiceSettings]);
+
+  // Persist settings to localStorage when they change
+  useEffect(() => {
+    saveSettings({ ttsProvider, voiceSettings, showMetrics, showLogs, personality });
+  }, [ttsProvider, voiceSettings, showMetrics, showLogs, personality]);
+
+  // Check Kokoro local TTS availability
+  useEffect(() => {
+    const checkKokoro = async () => {
+      try {
+        const status = await getKokoroStatus();
+        setKokoroAvailable(status.available);
+        setKokoroGpu(status.gpu || false);
+        if (status.available) {
+          addLog(`Local TTS (Kokoro): Available, GPU: ${status.gpu ? 'Yes' : 'No'}`, 'success');
+        }
+      } catch {
+        // Kokoro not available - that's fine
+      }
+    };
+    checkKokoro();
+    // Re-check every 30 seconds
+    const interval = setInterval(checkKokoro, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Initialize AudioContext
   useEffect(() => {
@@ -468,24 +604,22 @@ function App() {
           addLog(`[SENTENCE ${event.index}] Received: "${event.text.substring(0, 40)}..."`, 'stream');
 
           // Add/update message in UI
-          if (assistantMessageIndex === -1) {
-            // First sentence - create new message
-            const msg: ChatMessage = { role: 'assistant', content: event.text };
-            setMessages(prev => {
+          // Use functional updater with index tracking to avoid React batching issues
+          setMessages(prev => {
+            if (assistantMessageIndex === -1) {
+              // First sentence - create new message
               assistantMessageIndex = prev.length;
-              return [...prev, msg];
-            });
-          } else {
-            // Update existing message
-            setMessages(prev => {
+              return [...prev, { role: 'assistant', content: fullResponse.trim() }];
+            } else {
+              // Update existing message
               const updated = [...prev];
               updated[assistantMessageIndex] = {
                 ...updated[assistantMessageIndex],
                 content: fullResponse.trim()
               };
               return updated;
-            });
-          }
+            }
+          });
 
           // Queue TTS for this sentence (parallel to next sentence generation)
           enqueueTTS(event.text, event.index!, requestStart);
@@ -513,6 +647,16 @@ function App() {
               return updated;
             });
           }
+        } else if (event.type === 'pdf_generated') {
+          addLog(`PDF generated: ${event.taxpayer_name} - ${event.pdf_id}`, 'success');
+          const url = getPDFDownloadURL(event.pdf_id!);
+          setPdfDownloads(prev => [...prev, {
+            id: event.pdf_id!,
+            url,
+            name: event.taxpayer_name || 'Tax Summary',
+          }]);
+        } else if (event.type === 'tool_result') {
+          addLog(`Tool result: ${event.tool}`, 'info');
         } else if (event.type === 'error') {
           addLog(`Stream error: ${event.error}`, 'error');
           setIsThinking(false);
@@ -522,7 +666,7 @@ function App() {
           };
           setMessages(prev => [...prev, errorMessage]);
         }
-      }, controller.signal);
+      }, controller.signal, personality);
     } catch (error: any) {
       if (error.name === 'AbortError') {
         addLog('Request aborted by user', 'info');
@@ -568,6 +712,40 @@ function App() {
     addLog('All systems stopped', 'success');
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploading(true);
+    addLog(`Uploading document: ${file.name} (${(file.size / 1024).toFixed(1)}KB)`, 'info');
+
+    try {
+      const result = await uploadDocument(file);
+      if (result.success && result.document_id) {
+        addLog(`Document parsed: ${result.document_id} - ${result.summary?.incomeItems || 0} income, ${result.summary?.expenseItems || 0} expense items`, 'success');
+
+        // Send a message to Sakura about the uploaded document
+        const uploadMsg = `I've uploaded a document called "${result.filename}" (${result.fileType}). It has ${result.summary?.rows || 0} rows of data, ${result.summary?.incomeItems || 0} income items totaling R${(result.summary?.totalIncome || 0).toLocaleString()}, and ${result.summary?.expenseItems || 0} expense items totaling R${(result.summary?.totalExpenses || 0).toLocaleString()}. The document ID is ${result.document_id}. Please analyze it for me.`;
+
+        const userMessage: ChatMessage = { role: 'user', content: `[Uploaded: ${result.filename}] Please analyze this document for tax purposes.` };
+        setMessages(prev => {
+          getAIResponseStreaming(uploadMsg, prev);
+          return [...prev, userMessage];
+        });
+      } else {
+        addLog(`Upload failed: ${result.error}`, 'error');
+      }
+    } catch (err: any) {
+      addLog(`Upload error: ${err.message}`, 'error');
+    } finally {
+      setIsUploading(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
   const handleVoiceTranscript = async (text: string) => {
     addLog(`Voice transcript received: "${text}"`, 'info');
 
@@ -600,9 +778,12 @@ function App() {
   const { isListening, isRecording, isProcessing, volume, startListening, stopListening } =
     useAutoVoiceRecording({
       onTranscript: handleVoiceTranscript,
-      silenceThreshold: 0.15, // Higher = requires louder speech (filters out whispers/breathing)
-      silenceDuration: 1200, // Faster cutoff - 1.2s silence = more responsive
+      silenceThreshold: 0.12, // Slightly lower to catch softer speech
+      silenceDuration: 3000, // Base: 3s silence before stopping - allows natural pauses
       minRecordingDuration: 600, // Minimum recording length to filter noise
+      maxRecordingDuration: 120000, // Max 2 minutes per recording
+      silenceGrowthPerSecond: 200, // +200ms patience per second of speech recorded
+      maxSilenceDuration: 6000, // Cap at 6s silence tolerance for long recordings
     });
 
   const handleStopListening = () => {
@@ -721,6 +902,12 @@ function App() {
           <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-orange-500/50"></div>
           <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-orange-500/50"></div>
 
+          <button
+            onClick={onBack}
+            className="text-[9px] font-mono text-orange-600 hover:text-orange-400 tracking-wider uppercase mb-2 block"
+          >
+            ← BACK
+          </button>
           <div className="mb-2">
             <h1 className="text-3xl font-bold text-orange-500 tracking-widest mb-1" style={{ fontFamily: 'monospace', textShadow: '0 0 20px rgba(249, 115, 22, 0.8), 0 0 40px rgba(249, 115, 22, 0.4), 0 0 60px rgba(249, 115, 22, 0.2)' }}>
               <span className="inline-block transform hover:scale-105 transition-transform">S</span>
@@ -987,6 +1174,29 @@ function App() {
               </div>
             ))}
 
+            {/* PDF Download Buttons */}
+            {pdfDownloads.length > 0 && (
+              <div className="space-y-2 animate-fade-in">
+                {pdfDownloads.map((pdf) => (
+                  <div key={pdf.id} className="flex justify-start">
+                    <a
+                      href={pdf.url}
+                      download
+                      className="flex items-center gap-3 px-4 py-3 bg-green-950/50 border border-green-500/50 hover:border-green-500 text-green-400 hover:text-green-300 transition-all duration-200 shadow-lg shadow-green-500/20 clip-corners-small font-mono text-sm"
+                      style={{ textShadow: '0 0 10px rgba(34, 197, 94, 0.5)' }}
+                    >
+                      <span className="text-lg">📄</span>
+                      <div>
+                        <div className="text-xs tracking-wider uppercase">DOWNLOAD.PDF</div>
+                        <div className="text-[10px] text-green-600">{pdf.name}</div>
+                      </div>
+                      <span className="text-lg">⬇</span>
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Thinking Indicator */}
             {isThinking && (
               <div className="flex justify-start animate-fade-in">
@@ -1048,6 +1258,24 @@ function App() {
                   </button>
                 )}
               </div>
+
+              {/* File upload button */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.xls,.csv,.docx,.pdf"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading || isThinking}
+                className="flex-shrink-0 w-12 h-12 flex items-center justify-center transition-all duration-200 shadow-xl border clip-corners bg-orange-950/80 hover:bg-orange-900/80 disabled:bg-gray-900/80 shadow-orange-500/40 border-orange-500/50 disabled:border-gray-700/30 text-orange-400 disabled:text-gray-600 disabled:cursor-not-allowed"
+                title="Upload document (Excel, Word, PDF)"
+                style={isUploading || isThinking ? {} : { textShadow: '0 0 10px rgba(249, 115, 22, 0.8)' }}
+              >
+                <span className="text-xl">{isUploading ? '...' : '📎'}</span>
+              </button>
 
               <div className="flex-1 flex items-center bg-orange-950/30 px-5 py-3 border border-orange-700/30 focus-within:border-orange-500/60 focus-within:shadow-lg focus-within:shadow-orange-500/20 transition-all clip-corners">
                 <span className="text-orange-600 font-mono text-sm mr-2">{'>'}</span>
@@ -1145,7 +1373,7 @@ function App() {
           <div className="bg-black/90 border border-orange-500/50 p-8 max-w-lg w-full shadow-2xl shadow-orange-500/30 clip-corners max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-6">
               <h3 className="text-xl font-mono font-bold text-orange-500 tracking-widest uppercase" style={{ textShadow: '0 0 20px rgba(249, 115, 22, 0.6)' }}>
-                {'>'} VOICE.SETTINGS
+                {'>'} SETTINGS
               </h3>
               <button
                 onClick={() => setShowSettings(false)}
@@ -1156,81 +1384,204 @@ function App() {
             </div>
 
             <div className="space-y-6">
-              {/* Voice Selection */}
+              {/* TTS Provider Toggle */}
               <div>
                 <label className="text-xs font-mono text-orange-600 tracking-widest uppercase block mb-3">
-                  VOICE.TYPE
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  {([
-                    { id: 'nova', label: 'Nova', desc: 'Warm, female' },
-                    { id: 'alloy', label: 'Alloy', desc: 'Neutral, balanced' },
-                    { id: 'echo', label: 'Echo', desc: 'Warm, male' },
-                    { id: 'fable', label: 'Fable', desc: 'Expressive, British' },
-                    { id: 'onyx', label: 'Onyx', desc: 'Deep, male' },
-                    { id: 'shimmer', label: 'Shimmer', desc: 'Bright, female' },
-                  ] as const).map((v) => (
-                    <button
-                      key={v.id}
-                      onClick={() => {
-                        setVoiceSettings(prev => ({ ...prev, voice: v.id }));
-                        voiceSettingsRef.current = { ...voiceSettingsRef.current, voice: v.id };
-                      }}
-                      className={`px-3 py-2 text-left font-mono text-sm transition-all duration-200 clip-corners-small ${
-                        voiceSettings.voice === v.id
-                          ? 'bg-orange-950/80 text-orange-300 border border-orange-500/60 shadow-lg shadow-orange-500/30'
-                          : 'bg-orange-950/30 text-orange-600 border border-orange-700/30 hover:border-orange-600/50'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <div className={`w-2 h-2 rounded-full ${
-                          voiceSettings.voice === v.id ? 'bg-orange-500 shadow-lg shadow-orange-500/50' : 'bg-orange-800'
-                        }`}></div>
-                        <div>
-                          <div className="font-bold tracking-wider uppercase text-xs">{v.label}</div>
-                          <div className="text-[9px] text-orange-600/70">{v.desc}</div>
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Model Quality */}
-              <div>
-                <label className="text-xs font-mono text-orange-600 tracking-widest uppercase block mb-3">
-                  QUALITY.MODEL
+                  TTS.PROVIDER
                 </label>
                 <div className="flex gap-2">
-                  {([
-                    { id: 'tts-1', label: 'Standard', desc: 'Faster, lower latency' },
-                    { id: 'tts-1-hd', label: 'HD', desc: 'More natural, higher quality' },
-                  ] as const).map((m) => (
-                    <button
-                      key={m.id}
-                      onClick={() => {
-                        setVoiceSettings(prev => ({ ...prev, model: m.id }));
-                        voiceSettingsRef.current = { ...voiceSettingsRef.current, model: m.id };
-                      }}
-                      className={`flex-1 px-4 py-3 text-left font-mono text-sm transition-all duration-200 clip-corners-small ${
-                        voiceSettings.model === m.id
-                          ? 'bg-orange-950/80 text-orange-300 border border-orange-500/60 shadow-lg shadow-orange-500/30'
-                          : 'bg-orange-950/30 text-orange-600 border border-orange-700/30 hover:border-orange-600/50'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <div className={`w-2 h-2 rounded-full ${
-                          voiceSettings.model === m.id ? 'bg-orange-500 shadow-lg shadow-orange-500/50' : 'bg-orange-800'
-                        }`}></div>
-                        <div>
-                          <div className="font-bold tracking-wider uppercase text-xs">{m.label}</div>
-                          <div className="text-[9px] text-orange-600/70">{m.desc}</div>
+                  <button
+                    onClick={() => {
+                      setTtsProvider('openai');
+                      const newSettings = { ...voiceSettings, provider: 'openai' as const, voice: 'nova' };
+                      setVoiceSettings(newSettings);
+                      voiceSettingsRef.current = newSettings;
+                    }}
+                    className={`flex-1 px-4 py-3 text-left font-mono text-sm transition-all duration-200 clip-corners-small ${
+                      ttsProvider === 'openai'
+                        ? 'bg-orange-950/80 text-orange-300 border border-orange-500/60 shadow-lg shadow-orange-500/30'
+                        : 'bg-orange-950/30 text-orange-600 border border-orange-700/30 hover:border-orange-600/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${ttsProvider === 'openai' ? 'bg-orange-500 shadow-lg shadow-orange-500/50' : 'bg-orange-800'}`}></div>
+                      <div>
+                        <div className="font-bold tracking-wider uppercase text-xs">OpenAI</div>
+                        <div className="text-[9px] text-orange-600/70">Cloud API, paid</div>
+                      </div>
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (kokoroAvailable) {
+                        setTtsProvider('kokoro');
+                        const newSettings = { ...voiceSettings, provider: 'kokoro' as const, voice: 'af_heart' };
+                        setVoiceSettings(newSettings);
+                        voiceSettingsRef.current = newSettings;
+                      }
+                    }}
+                    disabled={!kokoroAvailable}
+                    className={`flex-1 px-4 py-3 text-left font-mono text-sm transition-all duration-200 clip-corners-small ${
+                      ttsProvider === 'kokoro'
+                        ? 'bg-green-950/80 text-green-300 border border-green-500/60 shadow-lg shadow-green-500/30'
+                        : kokoroAvailable
+                          ? 'bg-orange-950/30 text-orange-600 border border-orange-700/30 hover:border-green-600/50'
+                          : 'bg-gray-950/30 text-gray-600 border border-gray-700/30 cursor-not-allowed'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${
+                        ttsProvider === 'kokoro' ? 'bg-green-500 shadow-lg shadow-green-500/50'
+                        : kokoroAvailable ? 'bg-orange-800' : 'bg-gray-700'
+                      }`}></div>
+                      <div>
+                        <div className="font-bold tracking-wider uppercase text-xs">
+                          Kokoro {kokoroGpu ? '(GPU)' : ''}
+                        </div>
+                        <div className="text-[9px] text-orange-600/70">
+                          {kokoroAvailable ? 'Local, free, RTX 4090' : 'Run setup.bat'}
                         </div>
                       </div>
-                    </button>
-                  ))}
+                    </div>
+                  </button>
                 </div>
+                {!kokoroAvailable && (
+                  <p className="text-[9px] text-orange-700/60 font-mono mt-2">
+                    To enable local TTS: run server\local-tts\setup.bat
+                  </p>
+                )}
               </div>
+
+              {/* Voice Selection - OpenAI */}
+              {ttsProvider === 'openai' && (
+                <div>
+                  <label className="text-xs font-mono text-orange-600 tracking-widest uppercase block mb-3">
+                    VOICE.TYPE
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([
+                      { id: 'nova', label: 'Nova', desc: 'Warm, female' },
+                      { id: 'alloy', label: 'Alloy', desc: 'Neutral, balanced' },
+                      { id: 'echo', label: 'Echo', desc: 'Warm, male' },
+                      { id: 'fable', label: 'Fable', desc: 'Expressive, British' },
+                      { id: 'onyx', label: 'Onyx', desc: 'Deep, male' },
+                      { id: 'shimmer', label: 'Shimmer', desc: 'Bright, female' },
+                    ] as const).map((v) => (
+                      <button
+                        key={v.id}
+                        onClick={() => {
+                          setVoiceSettings(prev => ({ ...prev, voice: v.id }));
+                          voiceSettingsRef.current = { ...voiceSettingsRef.current, voice: v.id };
+                        }}
+                        className={`px-3 py-2 text-left font-mono text-sm transition-all duration-200 clip-corners-small ${
+                          voiceSettings.voice === v.id
+                            ? 'bg-orange-950/80 text-orange-300 border border-orange-500/60 shadow-lg shadow-orange-500/30'
+                            : 'bg-orange-950/30 text-orange-600 border border-orange-700/30 hover:border-orange-600/50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full ${
+                            voiceSettings.voice === v.id ? 'bg-orange-500 shadow-lg shadow-orange-500/50' : 'bg-orange-800'
+                          }`}></div>
+                          <div>
+                            <div className="font-bold tracking-wider uppercase text-xs">{v.label}</div>
+                            <div className="text-[9px] text-orange-600/70">{v.desc}</div>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Voice Selection - Kokoro */}
+              {ttsProvider === 'kokoro' && (
+                <div>
+                  <label className="text-xs font-mono text-green-600 tracking-widest uppercase block mb-3">
+                    KOKORO.VOICE
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([
+                      { id: 'af_heart', label: 'Heart', desc: 'Best quality, female', grade: 'A-' },
+                      { id: 'af_bella', label: 'Bella', desc: 'Natural, female', grade: 'A-' },
+                      { id: 'af_nicole', label: 'Nicole', desc: 'Warm, female', grade: 'B-' },
+                      { id: 'af_sarah', label: 'Sarah', desc: 'Clear, female', grade: 'C+' },
+                      { id: 'af_nova', label: 'Nova', desc: 'Bright, female', grade: 'C' },
+                      { id: 'af_sky', label: 'Sky', desc: 'Light, female', grade: 'C-' },
+                      { id: 'am_fenrir', label: 'Fenrir', desc: 'Strong, male', grade: 'C+' },
+                      { id: 'am_michael', label: 'Michael', desc: 'Natural, male', grade: 'C+' },
+                      { id: 'am_puck', label: 'Puck', desc: 'Expressive, male', grade: 'C+' },
+                      { id: 'am_adam', label: 'Adam', desc: 'Deep, male', grade: 'F+' },
+                      { id: 'bf_emma', label: 'Emma', desc: 'British, female', grade: '' },
+                      { id: 'bm_fable', label: 'Fable', desc: 'British, male', grade: '' },
+                    ]).map((v) => (
+                      <button
+                        key={v.id}
+                        onClick={() => {
+                          setVoiceSettings(prev => ({ ...prev, voice: v.id }));
+                          voiceSettingsRef.current = { ...voiceSettingsRef.current, voice: v.id };
+                        }}
+                        className={`px-3 py-2 text-left font-mono text-sm transition-all duration-200 clip-corners-small ${
+                          voiceSettings.voice === v.id
+                            ? 'bg-green-950/80 text-green-300 border border-green-500/60 shadow-lg shadow-green-500/30'
+                            : 'bg-orange-950/30 text-orange-600 border border-orange-700/30 hover:border-green-600/50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full ${
+                            voiceSettings.voice === v.id ? 'bg-green-500 shadow-lg shadow-green-500/50' : 'bg-orange-800'
+                          }`}></div>
+                          <div>
+                            <div className="font-bold tracking-wider uppercase text-xs">
+                              {v.label}
+                              {v.grade && <span className="ml-1 text-[8px] text-green-500/70">[{v.grade}]</span>}
+                            </div>
+                            <div className="text-[9px] text-orange-600/70">{v.desc}</div>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Model Quality - OpenAI only */}
+              {ttsProvider === 'openai' && (
+                <div>
+                  <label className="text-xs font-mono text-orange-600 tracking-widest uppercase block mb-3">
+                    QUALITY.MODEL
+                  </label>
+                  <div className="flex gap-2">
+                    {([
+                      { id: 'tts-1', label: 'Standard', desc: 'Faster, lower latency' },
+                      { id: 'tts-1-hd', label: 'HD', desc: 'More natural, higher quality' },
+                    ] as const).map((m) => (
+                      <button
+                        key={m.id}
+                        onClick={() => {
+                          setVoiceSettings(prev => ({ ...prev, model: m.id }));
+                          voiceSettingsRef.current = { ...voiceSettingsRef.current, model: m.id };
+                        }}
+                        className={`flex-1 px-4 py-3 text-left font-mono text-sm transition-all duration-200 clip-corners-small ${
+                          voiceSettings.model === m.id
+                            ? 'bg-orange-950/80 text-orange-300 border border-orange-500/60 shadow-lg shadow-orange-500/30'
+                            : 'bg-orange-950/30 text-orange-600 border border-orange-700/30 hover:border-orange-600/50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full ${
+                            voiceSettings.model === m.id ? 'bg-orange-500 shadow-lg shadow-orange-500/50' : 'bg-orange-800'
+                          }`}></div>
+                          <div>
+                            <div className="font-bold tracking-wider uppercase text-xs">{m.label}</div>
+                            <div className="text-[9px] text-orange-600/70">{m.desc}</div>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Speed Slider */}
               <div>
@@ -1278,14 +1629,15 @@ function App() {
               <div className="pt-4 border-t border-orange-900/50">
                 <button
                   onClick={async () => {
-                    addLog(`Testing voice: ${voiceSettings.voice}, speed: ${voiceSettings.speed}, model: ${voiceSettings.model}`, 'info');
+                    addLog(`Testing voice: ${voiceSettings.voice}, provider: ${ttsProvider}, speed: ${voiceSettings.speed}`, 'info');
                     try {
-                      const result = await synthesizeSpeech('Hello! This is how I sound with the current settings.', false, voiceSettings);
+                      const result = await synthesizeSpeech('Hello! This is how I sound with the current settings.', false, voiceSettingsRef.current);
                       if (result.success && result.audioData) {
                         const binaryString = atob(result.audioData);
                         const bytes = new Uint8Array(binaryString.length);
                         for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-                        const blob = new Blob([bytes], { type: 'audio/mpeg' });
+                        const mimeType = ttsProvider === 'kokoro' ? 'audio/wav' : 'audio/mpeg';
+                        const blob = new Blob([bytes], { type: mimeType });
                         const url = URL.createObjectURL(blob);
                         const audio = new Audio(url);
                         audio.onended = () => URL.revokeObjectURL(url);
@@ -1295,13 +1647,102 @@ function App() {
                       addLog(`Preview failed: ${err.message}`, 'error');
                     }
                   }}
-                  className="w-full px-6 py-3 bg-orange-950/80 hover:bg-orange-900/80 text-orange-400 font-mono text-sm tracking-wider uppercase border border-orange-500/50 hover:border-orange-500 transition-all duration-200 shadow-lg shadow-orange-500/30 clip-corners"
-                  style={{ textShadow: '0 0 10px rgba(249, 115, 22, 0.6)' }}
+                  className={`w-full px-6 py-3 font-mono text-sm tracking-wider uppercase border transition-all duration-200 shadow-lg clip-corners ${
+                    ttsProvider === 'kokoro'
+                      ? 'bg-green-950/80 hover:bg-green-900/80 text-green-400 border-green-500/50 hover:border-green-500 shadow-green-500/30'
+                      : 'bg-orange-950/80 hover:bg-orange-900/80 text-orange-400 border-orange-500/50 hover:border-orange-500 shadow-orange-500/30'
+                  }`}
+                  style={{ textShadow: ttsProvider === 'kokoro' ? '0 0 10px rgba(34, 197, 94, 0.6)' : '0 0 10px rgba(249, 115, 22, 0.6)' }}
                 >
                   {'>'} PREVIEW.VOICE
                 </button>
                 <p className="text-[10px] text-orange-700 font-mono mt-3 text-center">
-                  Changes apply immediately to all new speech
+                  {ttsProvider === 'kokoro'
+                    ? `Local inference on RTX 4090 ${kokoroGpu ? '(GPU)' : '(CPU)'}`
+                    : 'Changes apply immediately to all new speech'
+                  }
+                </p>
+              </div>
+
+              {/* ─── PERSONALITY SETTINGS ─── */}
+              <div className="pt-6 mt-2 border-t-2 border-orange-500/30">
+                <h4 className="text-lg font-mono font-bold text-orange-500 tracking-widest uppercase mb-4" style={{ textShadow: '0 0 15px rgba(249, 115, 22, 0.6)' }}>
+                  {'>'} PERSONALITY
+                </h4>
+
+                {/* Personality Presets */}
+                <div className="mb-5">
+                  <label className="text-xs font-mono text-orange-600 tracking-widest uppercase block mb-3">
+                    PRESET
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {Object.entries(PERSONALITY_PRESETS).map(([id, preset]) => (
+                      <button
+                        key={id}
+                        onClick={() => {
+                          setPersonality({
+                            preset: id,
+                            traits: { ...preset.traits },
+                          });
+                        }}
+                        className={`px-3 py-2 text-left font-mono text-sm transition-all duration-200 clip-corners-small ${
+                          personality.preset === id
+                            ? 'bg-orange-950/80 text-orange-300 border border-orange-500/60 shadow-lg shadow-orange-500/30'
+                            : 'bg-orange-950/30 text-orange-600 border border-orange-700/30 hover:border-orange-600/50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full ${
+                            personality.preset === id ? 'bg-orange-500 shadow-lg shadow-orange-500/50' : 'bg-orange-800'
+                          }`}></div>
+                          <div>
+                            <div className="font-bold tracking-wider uppercase text-xs">{preset.label}</div>
+                            <div className="text-[9px] text-orange-600/70">{preset.desc}</div>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Individual Trait Sliders */}
+                <div className="space-y-4">
+                  {([
+                    { key: 'warmth' as const, label: 'WARMTH', low: 'Cold', high: 'Warm' },
+                    { key: 'humor' as const, label: 'HUMOR', low: 'Serious', high: 'Playful' },
+                    { key: 'formality' as const, label: 'FORMALITY', low: 'Casual', high: 'Formal' },
+                    { key: 'directness' as const, label: 'DIRECTNESS', low: 'Gentle', high: 'Blunt' },
+                    { key: 'energy' as const, label: 'ENERGY', low: 'Calm', high: 'Energetic' },
+                  ]).map((trait) => (
+                    <div key={trait.key}>
+                      <label className="text-xs font-mono text-orange-600 tracking-widest uppercase block mb-1">
+                        {trait.label}: <span className="text-orange-400">{personality.traits[trait.key]}</span>
+                      </label>
+                      <div className="flex items-center gap-3">
+                        <span className="text-[10px] font-mono text-orange-700 w-14 text-right">{trait.low}</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={personality.traits[trait.key]}
+                          onChange={(e) => {
+                            const value = parseInt(e.target.value);
+                            setPersonality(prev => ({
+                              preset: 'custom',
+                              traits: { ...prev.traits, [trait.key]: value },
+                            }));
+                          }}
+                          className="flex-1 h-1 appearance-none bg-orange-900/50 rounded-full outline-none accent-orange-500"
+                        />
+                        <span className="text-[10px] font-mono text-orange-700 w-14">{trait.high}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <p className="text-[10px] text-orange-700 font-mono mt-4 text-center">
+                  Personality changes apply to the next message
                 </p>
               </div>
             </div>
@@ -1358,6 +1799,20 @@ function App() {
       `}</style>
     </div>
   );
+}
+
+function App() {
+  const [page, setPage] = useState<'landing' | 'sakura' | 'social'>('landing');
+
+  if (page === 'sakura') {
+    return <SakuraApp onBack={() => setPage('landing')} />;
+  }
+
+  if (page === 'social') {
+    return <SocialSimPage onBack={() => setPage('landing')} />;
+  }
+
+  return <LandingPage onNavigate={(p) => setPage(p)} />;
 }
 
 export default App;

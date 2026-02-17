@@ -21,7 +21,8 @@
     "paths": {
       "@/*": ["src/*"],
       "@main/*": ["src/main/*"],
-      "@renderer/*": ["src/renderer/*"],
+      "@sakura/*": ["src/sakura/*"],
+      "@office/*": ["src/office-social-simulator/*"],
       "@shared/*": ["src/shared/*"]
     }
   },
