@@ -4,6 +4,8 @@ import { useAutoVoiceRecording } from '../sakura/hooks/useAutoVoiceRecording';
 import { sendChatMessageStream, synthesizeSpeech, uploadDocument, getPDFDownloadURL, getKokoroStatus, type ChatMessage, type StreamEvent, type VoiceOptions } from '../sakura/services/api';
 import { LandingPage } from './pages/LandingPage';
 import { SocialSimPage } from '../office-social-simulator/pages/SocialSimPage';
+import { CouplePage } from '../couple/pages/CouplePage';
+import { AIAssistantPage } from '../ai-assistant/pages/AIAssistantPage';
 
 interface PerformanceMetrics {
   ttft?: number; // Time to First Token
@@ -156,6 +158,7 @@ function SakuraApp({ onBack }: { onBack: () => void }) {
   const [sessionStarted, setSessionStarted] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [pdfDownloads, setPdfDownloads] = useState<Array<{ id: string; url: string; name: string }>>([]);
+  const [documentContext, setDocumentContext] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -655,8 +658,18 @@ function SakuraApp({ onBack }: { onBack: () => void }) {
             url,
             name: event.taxpayer_name || 'Tax Summary',
           }]);
+          // Auto-download the PDF
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${(event.taxpayer_name || 'Tax-Summary').replace(/\s+/g, '-')}.pdf`;
+          a.click();
         } else if (event.type === 'tool_result') {
           addLog(`Tool result: ${event.tool}`, 'info');
+          // Persist document analysis so it survives across conversation turns
+          if (event.tool === 'analyze_document' && event.result && !event.result.error) {
+            setDocumentContext(JSON.stringify(event.result));
+            addLog('Document context saved for conversation persistence', 'success');
+          }
         } else if (event.type === 'error') {
           addLog(`Stream error: ${event.error}`, 'error');
           setIsThinking(false);
@@ -666,7 +679,7 @@ function SakuraApp({ onBack }: { onBack: () => void }) {
           };
           setMessages(prev => [...prev, errorMessage]);
         }
-      }, controller.signal, personality);
+      }, controller.signal, personality, documentContext);
     } catch (error: any) {
       if (error.name === 'AbortError') {
         addLog('Request aborted by user', 'info');
@@ -727,7 +740,7 @@ function SakuraApp({ onBack }: { onBack: () => void }) {
         // Send a message to Sakura about the uploaded document
         const uploadMsg = `I've uploaded a document called "${result.filename}" (${result.fileType}). It has ${result.summary?.rows || 0} rows of data, ${result.summary?.incomeItems || 0} income items totaling R${(result.summary?.totalIncome || 0).toLocaleString()}, and ${result.summary?.expenseItems || 0} expense items totaling R${(result.summary?.totalExpenses || 0).toLocaleString()}. The document ID is ${result.document_id}. Please analyze it for me.`;
 
-        const userMessage: ChatMessage = { role: 'user', content: `[Uploaded: ${result.filename}] Please analyze this document for tax purposes.` };
+        const userMessage: ChatMessage = { role: 'user', content: `[Uploaded: ${result.filename}] Document ID: ${result.document_id}. Please analyze this document for tax purposes.` };
         setMessages(prev => {
           getAIResponseStreaming(uploadMsg, prev);
           return [...prev, userMessage];
@@ -1802,7 +1815,7 @@ function SakuraApp({ onBack }: { onBack: () => void }) {
 }
 
 function App() {
-  const [page, setPage] = useState<'landing' | 'sakura' | 'social'>('landing');
+  const [page, setPage] = useState<'landing' | 'sakura' | 'social' | 'couple' | 'assistant'>('landing');
 
   if (page === 'sakura') {
     return <SakuraApp onBack={() => setPage('landing')} />;
@@ -1810,6 +1823,14 @@ function App() {
 
   if (page === 'social') {
     return <SocialSimPage onBack={() => setPage('landing')} />;
+  }
+
+  if (page === 'couple') {
+    return <CouplePage onBack={() => setPage('landing')} />;
+  }
+
+  if (page === 'assistant') {
+    return <AIAssistantPage onBack={() => setPage('landing')} />;
   }
 
   return <LandingPage onNavigate={(p) => setPage(p)} />;

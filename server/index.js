@@ -57,12 +57,14 @@ const documentsRouter = require('./routes/documents');
 const pdfRouter = require('./routes/pdf');
 const agentsRouter = require('./routes/agents');
 const socialRouter = require('./routes/social');
+const coupleRouter = require('./routes/couple');
 app.use('/api/voice', voiceRouter);
 app.use('/api/conversation', conversationRouter);
 app.use('/api/documents', documentsRouter);
 app.use('/api/pdf', pdfRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/social', socialRouter);
+app.use('/api/couple', coupleRouter);
 
 /**
  * @swagger
@@ -103,7 +105,7 @@ app.listen(PORT, async () => {
   logger.info(`📚 API docs: http://localhost:${PORT}/api-docs`);
   logger.info(`🎤 Voice services: ${process.env.OPENAI_API_KEY ? 'Configured ✓' : 'Not configured ✗'}`);
   logger.info(`Logs: c:\\logs\\office-simulator-YYYY-MM-DD.log (20MB chunks, max 50 files)`);
-  logger.info('Routes mounted: voice, conversation, documents, pdf, agents, social');
+  logger.info('Routes mounted: voice, conversation, documents, pdf, agents, social, couple');
 
   // Try to auto-start local Kokoro TTS if setup is complete
   try {

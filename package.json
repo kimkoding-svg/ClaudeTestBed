@@ -4,7 +4,8 @@
   "description": "AI Companion Desktop Application with Voice Interface and Permanent Memory",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "npm run build:main && concurrently \"vite\" \"npm run server\"",
+    "dev": "npm run build:main && concurrently -n vite,server -c cyan,green \"vite\" \"npm run server\"",
+    "dev:public": "npm run build:main && concurrently -n vite,server,tunnel -c cyan,green,magenta \"vite\" \"npm run server\" \"node scripts/tunnel.js\"",
     "server": "node server/index.js",
     "build": "npm run build:main && vite build",
     "build:main": "tsc -p tsconfig.main.json",
@@ -38,6 +39,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@ngrok/ngrok": "^1.7.0",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.18",

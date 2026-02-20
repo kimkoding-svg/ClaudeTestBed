@@ -24,6 +24,6 @@
       "@shared/*": ["src/shared/*"]
     }
   },
-  "include": ["src/main/services/voice/**/*", "src/shared/**/*"],
+  "include": ["src/main/services/voice/**/*"],
   "exclude": ["node_modules", "dist", "dist-electron", "src/main/index.ts", "src/main/services/storage/**/*"]
 }

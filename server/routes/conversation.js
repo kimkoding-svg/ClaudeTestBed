@@ -209,7 +209,7 @@ router.post('/chat-stream', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { message, history = [], personality } = req.body;
+    const { message, history = [], personality, documentContext } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'Message is required' });
@@ -238,7 +238,10 @@ router.post('/chat-stream', async (req, res) => {
       }
     ];
 
-    const systemPrompt = getSystemPrompt(ACTIVE_EXPERTISE, personality || null);
+    let systemPrompt = getSystemPrompt(ACTIVE_EXPERTISE, personality || null);
+    if (documentContext) {
+      systemPrompt += `\n\n## UPLOADED DOCUMENT DATA\nThe user has uploaded a document. Here is the extracted content — use this data for all analysis. Do NOT ask the user to re-upload:\n${documentContext}`;
+    }
     const tools = getAllToolDefinitions();
 
     log.info('Stream request', { messageLength: message.length, historyLength: history.length });
@@ -416,6 +419,16 @@ router.post('/chat-stream', async (req, res) => {
             query: toolBlock.input.query,
             results: result.results || [],
             message: result.message,
+            timestamp: Date.now()
+          })}\n\n`);
+        }
+
+        // Send document analysis to frontend for persistence
+        if (toolBlock.name === 'analyze_document' && !result.error) {
+          res.write(`data: ${JSON.stringify({
+            type: 'tool_result',
+            tool: toolBlock.name,
+            result: result,
             timestamp: Date.now()
           })}\n\n`);
         }

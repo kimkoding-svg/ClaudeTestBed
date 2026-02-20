@@ -8,7 +8,7 @@ import {
   SocialSSEEvent,
 } from '../../shared/types/social-sim';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // ─── API Calls ──────────────────────────────────────────
 

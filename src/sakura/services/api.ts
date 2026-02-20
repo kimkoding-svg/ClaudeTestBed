@@ -2,7 +2,7 @@
  * API client for communicating with the backend server
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 export interface TranscriptionResult {
   success: boolean;
@@ -227,14 +227,15 @@ export async function sendChatMessageStream(
   history: ChatMessage[],
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal,
-  personality?: PersonalityConfig
+  personality?: PersonalityConfig,
+  documentContext?: string | null
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/conversation/chat-stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ message, history, personality }),
+    body: JSON.stringify({ message, history, personality, documentContext: documentContext || undefined }),
     signal,
   });
 
